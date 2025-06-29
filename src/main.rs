@@ -328,17 +328,17 @@ fn run_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 fn run_tensors(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
         println!("Error: Missing model file");
-        println!("Usage: gguf-cli tensors <model.gguf>");
+        println!("Usage: gguf-cli tensors <model.gguf> [--all]");
         return Ok(());
     }
 
     let model_path = &args[0];
+    let show_all = args.get(1).map_or(false, |arg| arg == "--all");
 
     println!("🎯 Loading model tensors: {}", model_path);
     let loader = ModelLoader::load(model_path)?;
 
     println!("📊 Total tensors: {}", loader.tensor_count());
-    println!("{}", "=".repeat(80));
 
     // Group tensors by type
     let mut tensor_info: Vec<_> = loader
@@ -357,29 +357,59 @@ fn run_tensors(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Sort by name for consistent output
     tensor_info.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let display_count = if show_all {
+        tensor_info.len()
+    } else {
+        20.min(tensor_info.len())
+    };
+
+    println!("{}", "=".repeat(80));
     println!(
         "{:<40} {:<20} {:<10} {:<10}",
         "Tensor Name", "Shape", "Type", "Size (KB)"
     );
     println!("{}", "-".repeat(80));
 
-    for (name, shape, quant_type, size_bytes) in tensor_info {
-        let shape_str = format!("{:?}", shape);
-        let size_kb = size_bytes / 1024;
+    // Look for embedding tensors specifically
+    let mut embedding_tensors = Vec::new();
 
-        let form = &format!("{}...", &shape_str[..17]);
+    for (i, (name, shape, quant_type, size_bytes)) in tensor_info.iter().enumerate() {
+        if i < display_count {
+            let shape_str = format!("{:?}", shape);
+            let size_kb = size_bytes / 1024;
 
-        println!(
-            "{:<40} {:<20} {:<10?} {:<10}",
-            name,
-            if shape_str.len() > 20 {
-                form
+            // Safe string truncation
+            let display_shape = if shape_str.len() > 20 {
+                format!("{}...", &shape_str[..17])
             } else {
-                &shape_str
-            },
-            quant_type,
-            size_kb
+                shape_str
+            };
+
+            println!(
+                "{:<40} {:<20} {:<10?} {:<10}",
+                name, display_shape, quant_type, size_kb
+            );
+        }
+
+        // Collect potential embedding tensors
+        if name.contains("embed") || name.contains("tok") {
+            embedding_tensors.push(name.clone());
+        }
+    }
+
+    if !show_all && tensor_info.len() > display_count {
+        println!(
+            "... and {} more tensors (use --all to see all)",
+            tensor_info.len() - display_count
         );
+    }
+
+    // Show potential embedding tensors
+    if !embedding_tensors.is_empty() {
+        println!("\n🔍 Potential Token Embedding Tensors:");
+        for name in embedding_tensors {
+            println!("  {}", name);
+        }
     }
 
     // Summary by tensor type

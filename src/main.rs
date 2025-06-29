@@ -9,7 +9,6 @@ fn main() -> std::io::Result<()> {
 
     let start = Instant::now();
     let loader = GgufLoader::load("/Users/evisdrenova/Downloads/gemma-3n-E4B-it-f16.gguf")?;
-    let loader = GgufLoader::load(format!("{}/Downloads/MODEL_NAME.gguf", home))?;
     println!("🚀 Model loaded in: {:?}", start.elapsed());
 
     // Inspect model configuration

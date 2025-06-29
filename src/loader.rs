@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+// GGUF Data Types (same as before)
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u32)]
 pub enum GgufType {
@@ -24,7 +25,6 @@ pub enum GgufType {
 
 impl TryFrom<u32> for GgufType {
     type Error = String;
-
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(GgufType::UInt8),
@@ -45,7 +45,7 @@ impl TryFrom<u32> for GgufType {
     }
 }
 
-// Quantization formats
+// Quantization formats (same as before)
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u32)]
 pub enum QuantType {
@@ -67,7 +67,6 @@ pub enum QuantType {
 
 impl TryFrom<u32> for QuantType {
     type Error = String;
-
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(QuantType::F32),
@@ -89,6 +88,54 @@ impl TryFrom<u32> for QuantType {
     }
 }
 
+// Tokenizer with full vocabulary support
+#[derive(Debug, Default)]
+pub struct Tokenizer {
+    pub vocab: Vec<String>,
+    pub scores: Vec<f32>,
+    pub token_types: Vec<i32>,
+    pub bos_token_id: u32,
+    pub eos_token_id: u32,
+    pub unknown_token_id: u32,
+    pub padding_token_id: u32,
+    pub add_bos_token: bool,
+    pub add_eos_token: bool,
+    pub chat_template: String,
+}
+
+impl Tokenizer {
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
+
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        // Simplified tokenization - for production you'd implement proper tokenization
+        // This is just a placeholder for the CLI framework
+        text.split_whitespace()
+            .map(|word| {
+                self.vocab
+                    .iter()
+                    .position(|v| v == word)
+                    .unwrap_or(self.unknown_token_id as usize) as u32
+            })
+            .collect()
+    }
+
+    pub fn decode(&self, tokens: &[u32]) -> String {
+        tokens
+            .iter()
+            .map(|&token_id| {
+                self.vocab
+                    .get(token_id as usize)
+                    .map(|s| s.as_str())
+                    .unwrap_or("<UNK>")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+// Enhanced model configuration
 #[derive(Debug, Default)]
 pub struct ModelConfig {
     pub vocab_size: u32,
@@ -101,9 +148,26 @@ pub struct ModelConfig {
     pub attention_layer_norm_rms_epsilon: f32,
     pub rope_freq_base: f32,
     pub rope_scaling_type: String,
+
+    // Additional Gemma-specific parameters
+    pub attention_key_length: u32,
+    pub attention_value_length: u32,
+    pub attention_sliding_window: u32,
+    pub shared_kv_layers: u32,
+
+    // Model metadata
+    pub architecture: String,
+    pub model_type: String,
+    pub size_label: String,
+    pub license: String,
+    pub organization: String,
+
+    // Per-layer configurations
+    pub activation_sparsity_scale: Vec<f32>,
+    pub sliding_window_pattern: Vec<bool>,
 }
 
-// Tensor descriptor - points to data in the mmap
+// Tensor descriptor (same as before)
 #[derive(Debug, Clone)]
 pub struct TensorDesc {
     pub name: String,
@@ -113,6 +177,7 @@ pub struct TensorDesc {
     pub size: u64,
 }
 
+// Zero-copy tensor view (same as before)
 #[derive(Debug)]
 pub struct TensorView<'a> {
     pub desc: &'a TensorDesc,
@@ -123,39 +188,36 @@ impl<'a> TensorView<'a> {
     pub fn shape(&self) -> &[u64] {
         &self.desc.shape
     }
-
     pub fn quant_type(&self) -> QuantType {
         self.desc.quant_type
     }
-
     pub fn element_count(&self) -> u64 {
         self.desc.shape.iter().product()
     }
 }
 
+// Complete GGUF loader with tokenizer support
 pub struct GgufLoader {
-    _file: File,                          // Keep file handle alive
-    mmap: Mmap,                           // Memory-mapped file
-    config: ModelConfig,                  // Model hyperparameters
-    tensors: HashMap<String, TensorDesc>, // Tensor directory
+    _file: File,
+    mmap: Mmap,
+    config: ModelConfig,
+    tensors: HashMap<String, TensorDesc>,
+    tokenizer: Tokenizer,
 }
 
 impl GgufLoader {
-    /// Load a GGUF model with zero-copy memory mapping
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let load_start = std::time::Instant::now();
 
-        // Step 1: Open and memory-map the file
         let file = File::open(path)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
         println!("⏱️  File mapping: {:?}", load_start.elapsed());
 
-        // Step 2: Parse header and hyperparameters
         let parse_start = std::time::Instant::now();
         let mut reader = ByteReader::new(&mmap);
 
-        // Check magic number
+        // Check magic and version (same as before)
         let magic = reader.read_bytes(4)?;
         if magic != b"GGUF" {
             return Err(io::Error::new(
@@ -164,7 +226,6 @@ impl GgufLoader {
             ));
         }
 
-        // Read version
         let version = reader.read_u32()?;
         if version != 3 {
             return Err(io::Error::new(
@@ -173,7 +234,6 @@ impl GgufLoader {
             ));
         }
 
-        // Read tensor count and metadata count
         let tensor_count = reader.read_u64()?;
         let metadata_count = reader.read_u64()?;
 
@@ -182,24 +242,37 @@ impl GgufLoader {
             version, tensor_count, metadata_count
         );
 
-        // Parse metadata (hyperparameters)
+        // Parse metadata with array support
         let mut config = ModelConfig::default();
-        for _ in 0..metadata_count {
-            let key = reader.read_string()?;
-            let value_type = GgufType::try_from(reader.read_u32()?)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut tokenizer = Tokenizer::default();
 
-            Self::parse_metadata_value(&mut reader, &key, value_type, &mut config)?;
+        for i in 0..metadata_count {
+            let key = reader.read_string()?;
+            let value_type_raw = reader.read_u32()?;
+            let value_type = GgufType::try_from(value_type_raw).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid type {} for key '{}': {}", value_type_raw, key, e),
+                )
+            })?;
+
+            println!(
+                "Metadata {}/{}: '{}' ({:?})",
+                i + 1,
+                metadata_count,
+                key,
+                value_type
+            );
+
+            Self::parse_metadata_value(&mut reader, &key, value_type, &mut config, &mut tokenizer)?;
         }
 
         println!("⏱️  Metadata parsing: {:?}", parse_start.elapsed());
 
-        // Step 3: Build tensor directory
+        // Parse tensor directory (same as before)
         let tensor_start = std::time::Instant::now();
         let mut tensors = HashMap::with_capacity(tensor_count as usize);
-
-        // Parse tensor info (names, shapes, types)
-        let mut data_offset = reader.position();
+        let data_offset = reader.position();
 
         for _ in 0..tensor_count {
             let name = reader.read_string()?;
@@ -214,12 +287,9 @@ impl GgufLoader {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let offset = reader.read_u64()?;
-
-            // Calculate tensor size
             let element_count: u64 = shape.iter().product();
             let size = Self::calculate_tensor_size(element_count, quant_type);
 
-            // insert into the hashmap
             tensors.insert(
                 name.clone(),
                 TensorDesc {
@@ -240,14 +310,17 @@ impl GgufLoader {
             mmap,
             config,
             tensors,
+            tokenizer,
         })
     }
-    /// Get model configuration
+
     pub fn config(&self) -> &ModelConfig {
         &self.config
     }
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
 
-    /// Get tensor by name (zero-copy)
     pub fn get_tensor(&self, name: &str) -> Option<TensorView> {
         let desc = self.tensors.get(name)?;
         let start = desc.offset as usize;
@@ -263,77 +336,198 @@ impl GgufLoader {
         })
     }
 
-    /// List all tensor names
     pub fn tensor_names(&self) -> impl Iterator<Item = &String> {
         self.tensors.keys()
     }
 
-    /// Get tensor count
     pub fn tensor_count(&self) -> usize {
         self.tensors.len()
     }
 
-    // Helper: Calculate tensor size based on quantization
-    fn calculate_tensor_size(element_count: u64, quant_type: QuantType) -> u64 {
-        match quant_type {
-            QuantType::F32 => element_count * 4,
-            QuantType::F16 => element_count * 2,
-            QuantType::Q4_0 => element_count / 2 + element_count / 32 * 2, // 4.5 bits per element
-            QuantType::Q4_1 => element_count / 2 + element_count / 32 * 4, // 4.625 bits per element
-            QuantType::Q8_0 => element_count + element_count / 32 * 2,     // 8.25 bits per element
-            QuantType::Q8_1 => element_count + element_count / 32 * 4,     // 8.5 bits per element
-            _ => element_count, // Fallback for other types
-        }
-    }
-
-    // Helper: Parse metadata values
+    // Enhanced metadata parsing with array support
     fn parse_metadata_value(
         reader: &mut ByteReader,
         key: &str,
         value_type: GgufType,
         config: &mut ModelConfig,
+        tokenizer: &mut Tokenizer,
     ) -> io::Result<()> {
         match value_type {
             GgufType::UInt32 => {
                 let value = reader.read_u32()?;
-                match key {
-                    "llama.vocab_size" => config.vocab_size = value,
-                    "llama.context_length" => config.context_length = value,
-                    "llama.embedding_length" => config.embedding_length = value,
-                    "llama.block_count" => config.block_count = value,
-                    "llama.feed_forward_length" => config.feed_forward_length = value,
-                    "llama.attention.head_count" => config.attention_head_count = value,
-                    "llama.attention.head_count_kv" => config.attention_head_count_kv = value,
-                    _ => {} // Ignore unknown keys
+                println!("  {} = {}", key, value);
+
+                // Model-agnostic parameter matching
+                if key.ends_with(".context_length") {
+                    config.context_length = value;
+                } else if key.ends_with(".embedding_length") {
+                    config.embedding_length = value;
+                } else if key.ends_with(".block_count") {
+                    config.block_count = value;
+                } else if key.ends_with(".feed_forward_length") {
+                    config.feed_forward_length = value;
+                } else if key.ends_with(".attention.head_count") {
+                    config.attention_head_count = value;
+                } else if key.ends_with(".attention.head_count_kv") {
+                    config.attention_head_count_kv = value;
+                } else if key.ends_with(".attention.key_length") {
+                    config.attention_key_length = value;
+                } else if key.ends_with(".attention.value_length") {
+                    config.attention_value_length = value;
+                } else if key.ends_with(".attention.sliding_window") {
+                    config.attention_sliding_window = value;
+                } else if key.ends_with(".attention.shared_kv_layers") {
+                    config.shared_kv_layers = value;
+                } else if key == "tokenizer.ggml.bos_token_id" {
+                    tokenizer.bos_token_id = value;
+                } else if key == "tokenizer.ggml.eos_token_id" {
+                    tokenizer.eos_token_id = value;
+                } else if key == "tokenizer.ggml.unknown_token_id" {
+                    tokenizer.unknown_token_id = value;
+                } else if key == "tokenizer.ggml.padding_token_id" {
+                    tokenizer.padding_token_id = value;
                 }
             }
             GgufType::Float32 => {
                 let value = reader.read_f32()?;
-                match key {
-                    "llama.attention.layer_norm_rms_epsilon" => {
-                        config.attention_layer_norm_rms_epsilon = value
-                    }
-                    "llama.rope.freq_base" => config.rope_freq_base = value,
-                    _ => {}
+                println!("  {} = {}", key, value);
+                if key.ends_with(".attention.layer_norm_rms_epsilon") {
+                    config.attention_layer_norm_rms_epsilon = value;
+                } else if key.ends_with(".rope.freq_base") {
+                    config.rope_freq_base = value;
                 }
             }
             GgufType::String => {
                 let value = reader.read_string()?;
-                match key {
-                    "llama.rope.scaling.type" => config.rope_scaling_type = value,
-                    _ => {}
+                let display_value = if value.len() > 100 {
+                    format!("{}...", &value[..100])
+                } else {
+                    value.clone()
+                };
+                println!("  {} = '{}'", key, display_value);
+                if key == "general.architecture" {
+                    config.architecture = value;
+                } else if key == "general.type" {
+                    config.model_type = value;
+                } else if key == "general.size_label" {
+                    config.size_label = value;
+                } else if key == "general.license" {
+                    config.license = value;
+                } else if key.ends_with(".organization") {
+                    config.organization = value;
+                } else if key == "tokenizer.chat_template" {
+                    tokenizer.chat_template = value;
                 }
             }
-            // Skip other types for now
+            GgufType::Bool => {
+                let value = reader.read_bytes(1)?[0] != 0;
+                println!("  {} = {}", key, value);
+                if key == "tokenizer.ggml.add_bos_token" {
+                    tokenizer.add_bos_token = value;
+                } else if key == "tokenizer.ggml.add_eos_token" {
+                    tokenizer.add_eos_token = value;
+                }
+            }
+            GgufType::Array => {
+                let array_type_raw = reader.read_u32()?;
+                let array_type = GgufType::try_from(array_type_raw)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let array_len = reader.read_u64()?;
+
+                println!("  {} = <Array: {:?}[{}]>", key, array_type, array_len);
+
+                // Parse important arrays
+                match key {
+                    "tokenizer.ggml.tokens" => {
+                        println!("    📚 Loading vocabulary...");
+                        tokenizer.vocab = Self::parse_string_array(reader, array_len)?;
+                        config.vocab_size = array_len as u32;
+                    }
+                    "tokenizer.ggml.scores" => {
+                        println!("    📊 Loading token scores...");
+                        tokenizer.scores = Self::parse_float_array(reader, array_len)?;
+                    }
+                    "tokenizer.ggml.token_type" => {
+                        println!("    🏷️  Loading token types...");
+                        tokenizer.token_types = Self::parse_int_array(reader, array_len)?;
+                    }
+                    key if key.ends_with(".activation_sparsity_scale") => {
+                        println!("    ⚡ Loading sparsity scales...");
+                        config.activation_sparsity_scale =
+                            Self::parse_float_array(reader, array_len)?;
+                    }
+                    key if key.ends_with(".attention.sliding_window_pattern") => {
+                        println!("    🪟 Loading sliding window patterns...");
+                        config.sliding_window_pattern = Self::parse_bool_array(reader, array_len)?;
+                    }
+                    _ => {
+                        // Skip other arrays
+                        Self::skip_array(reader, array_type, array_len)?;
+                    }
+                }
+            }
             _ => {
+                println!("  {} = <{:?} - skipped>", key, value_type);
                 reader.skip_value(value_type)?;
             }
         }
         Ok(())
     }
+
+    // Array parsing methods
+    fn parse_string_array(reader: &mut ByteReader, len: u64) -> io::Result<Vec<String>> {
+        let mut result = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            result.push(reader.read_string()?);
+        }
+        Ok(result)
+    }
+
+    fn parse_float_array(reader: &mut ByteReader, len: u64) -> io::Result<Vec<f32>> {
+        let mut result = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            result.push(reader.read_f32()?);
+        }
+        Ok(result)
+    }
+
+    fn parse_int_array(reader: &mut ByteReader, len: u64) -> io::Result<Vec<i32>> {
+        let mut result = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            result.push(reader.read_i32()?);
+        }
+        Ok(result)
+    }
+
+    fn parse_bool_array(reader: &mut ByteReader, len: u64) -> io::Result<Vec<bool>> {
+        let mut result = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            result.push(reader.read_bytes(1)?[0] != 0);
+        }
+        Ok(result)
+    }
+
+    fn skip_array(reader: &mut ByteReader, array_type: GgufType, len: u64) -> io::Result<()> {
+        for _ in 0..len {
+            reader.skip_value(array_type)?;
+        }
+        Ok(())
+    }
+
+    fn calculate_tensor_size(element_count: u64, quant_type: QuantType) -> u64 {
+        match quant_type {
+            QuantType::F32 => element_count * 4,
+            QuantType::F16 => element_count * 2,
+            QuantType::Q4_0 => element_count / 2 + element_count / 32 * 2,
+            QuantType::Q4_1 => element_count / 2 + element_count / 32 * 4,
+            QuantType::Q8_0 => element_count + element_count / 32 * 2,
+            QuantType::Q8_1 => element_count + element_count / 32 * 4,
+            _ => element_count,
+        }
+    }
 }
 
-// bye reader for the mmap data
+// Enhanced ByteReader with additional methods
 struct ByteReader<'a> {
     data: &'a [u8],
     position: usize,
@@ -343,7 +537,6 @@ impl<'a> ByteReader<'a> {
     fn new(data: &'a [u8]) -> Self {
         Self { data, position: 0 }
     }
-
     fn position(&self) -> u64 {
         self.position as u64
     }
@@ -352,7 +545,12 @@ impl<'a> ByteReader<'a> {
         if self.position + count > self.data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "Unexpected EOF",
+                format!(
+                    "Unexpected EOF: trying to read {} bytes at position {}, but file is only {} bytes",
+                    count,
+                    self.position,
+                    self.data.len()
+                ),
             ));
         }
         let slice = &self.data[self.position..self.position + count];
@@ -372,6 +570,11 @@ impl<'a> ByteReader<'a> {
         ]))
     }
 
+    fn read_i32(&mut self) -> io::Result<i32> {
+        let bytes = self.read_bytes(4)?;
+        Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
     fn read_f32(&mut self) -> io::Result<f32> {
         let bytes = self.read_bytes(4)?;
         Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -386,28 +589,27 @@ impl<'a> ByteReader<'a> {
     fn skip_value(&mut self, value_type: GgufType) -> io::Result<()> {
         match value_type {
             GgufType::UInt8 | GgufType::Int8 | GgufType::Bool => {
-                self.position += 1;
+                self.read_bytes(1)?;
             }
             GgufType::UInt16 | GgufType::Int16 => {
-                self.position += 2;
+                self.read_bytes(2)?;
             }
             GgufType::UInt32 | GgufType::Int32 | GgufType::Float32 => {
-                self.position += 4;
+                self.read_bytes(4)?;
             }
             GgufType::UInt64 | GgufType::Int64 | GgufType::Float64 => {
-                self.position += 8;
+                self.read_bytes(8)?;
             }
             GgufType::String => {
                 let len = self.read_u64()? as usize;
-                self.position += len;
+                self.read_bytes(len)?;
             }
             GgufType::Array => {
-                let _array_type = self.read_u32()?;
+                let array_type = GgufType::try_from(self.read_u32()?)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 let array_len = self.read_u64()?;
-                // For simplicity, skip array elements (would need recursive parsing)
                 for _ in 0..array_len {
-                    // This is simplified - real implementation would parse based on array_type
-                    self.position += 4; // Assume 4-byte elements for now
+                    self.skip_value(array_type)?;
                 }
             }
         }

@@ -1,7 +1,7 @@
 use memmap2::{Mmap, MmapOptions};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self};
 use std::path::Path;
 
 // GGUF Data Types (same as before)
@@ -46,7 +46,7 @@ impl TryFrom<u32> for GgufType {
 }
 
 // Quantization formats (same as before)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum QuantType {
     F32 = 0,

@@ -197,7 +197,7 @@ impl<'a> TensorView<'a> {
 }
 
 // Complete GGUF loader with tokenizer support
-pub struct GgufLoader {
+pub struct ModelLoader {
     _file: File,
     mmap: Mmap,
     config: ModelConfig,
@@ -205,7 +205,7 @@ pub struct GgufLoader {
     tokenizer: Tokenizer,
 }
 
-impl GgufLoader {
+impl ModelLoader {
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let load_start = std::time::Instant::now();
 
@@ -305,7 +305,7 @@ impl GgufLoader {
         println!("⏱️  Tensor directory: {:?}", tensor_start.elapsed());
         println!("✅ Total load time: {:?}", load_start.elapsed());
 
-        Ok(GgufLoader {
+        Ok(ModelLoader {
             _file: file,
             mmap,
             config,

@@ -2,13 +2,13 @@ use std::time::Instant;
 
 mod loader;
 
-use crate::loader::GgufLoader;
+use crate::loader::ModelLoader;
 
 fn main() -> std::io::Result<()> {
     let home = std::env::var("HOME").unwrap();
 
     let start = Instant::now();
-    let loader = GgufLoader::load("/Users/evisdrenova/Downloads/gemma-3n-E4B-it-f16.gguf")?;
+    let loader = ModelLoader::load("/Users/evisdrenova/Downloads/gemma-3n-E4B-it-f16.gguf")?;
     println!("🚀 Model loaded in: {:?}", start.elapsed());
 
     // Inspect model configuration

@@ -146,9 +146,12 @@ impl InferenceEngine {
 
         Ok(last_token_logits)
     }
+
     fn token_embeddings(&self, tokens: &[u32]) -> Result<Vec<f32>, InferenceError> {
         let token_emb = self
-            .get_tensor("token_emb.weight")
+            .get_tensor("token_embd.weight") // Added 'd' - this is the correct name for Gemma 3n
+            .or_else(|| self.get_tensor("per_layer_token_embd.weight")) // Alternative for Gemma 3n
+            .or_else(|| self.get_tensor("token_emb.weight")) // Original fallback
             .or_else(|| self.get_tensor("tok_embeddings.weight"))
             .or_else(|| self.get_tensor("embed_tokens.weight"))
             .ok_or(InferenceError::TensorNotFound(
@@ -382,7 +385,9 @@ impl InferenceEngine {
     fn output_projection(&self, hidden_states: &[f32]) -> Result<Vec<f32>, InferenceError> {
         // Use the same embedding weights (tied weights)
         let token_emb = self
-            .get_tensor("token_emb.weight")
+            .get_tensor("token_embd.weight") // Added 'd' - correct name for Gemma 3n
+            .or_else(|| self.get_tensor("per_layer_token_embd.weight")) // Alternative for Gemma 3n
+            .or_else(|| self.get_tensor("token_emb.weight")) // Original fallback
             .or_else(|| self.get_tensor("tok_embeddings.weight"))
             .or_else(|| self.get_tensor("embed_tokens.weight"))
             .ok_or(InferenceError::TensorNotFound(
@@ -448,8 +453,17 @@ impl InferenceEngine {
                 Ok(result)
             }
             QuantType::F16 => {
-                // TODO: Implement F16 dequantization
-                Err(InferenceError::UnsupportedQuantization(tensor.quant_type()))
+                let data = tensor.data;
+                let mut result = Vec::with_capacity(data.len() / 2);
+
+                for chunk in data.chunks_exact(2) {
+                    // Convert F16 to F32
+                    let f16_bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    let f32_value = f16_to_f32(f16_bits);
+                    result.push(f32_value);
+                }
+
+                Ok(result)
             }
             _ => {
                 // TODO: Implement quantized formats (Q4_0, Q8_0, etc.)
@@ -495,4 +509,41 @@ fn gelu(x: f32) -> f32 {
 
 fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
+}
+
+fn f16_to_f32(f16_bits: u16) -> f32 {
+    // Extract components
+    let sign = (f16_bits >> 15) & 0x1;
+    let exponent = (f16_bits >> 10) & 0x1F;
+    let mantissa = f16_bits & 0x3FF;
+
+    // Handle special cases
+    if exponent == 0 {
+        if mantissa == 0 {
+            // Zero
+            return if sign == 1 { -0.0 } else { 0.0 };
+        } else {
+            // Subnormal numbers
+            let value = (mantissa as f32) / 1024.0 * 2.0_f32.powi(-14);
+            return if sign == 1 { -value } else { value };
+        }
+    } else if exponent == 31 {
+        // Infinity or NaN
+        return if mantissa == 0 {
+            if sign == 1 {
+                f32::NEG_INFINITY
+            } else {
+                f32::INFINITY
+            }
+        } else {
+            f32::NAN
+        };
+    }
+
+    // Normal numbers
+    let exponent_f32 = (exponent as i32) - 15 + 127; // Convert exponent bias
+    let mantissa_f32 = (mantissa as u32) << 13; // Shift mantissa to F32 position
+
+    let f32_bits = ((sign as u32) << 31) | ((exponent_f32 as u32) << 23) | mantissa_f32;
+    f32::from_bits(f32_bits)
 }

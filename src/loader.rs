@@ -101,38 +101,169 @@ pub struct Tokenizer {
     pub add_bos_token: bool,
     pub add_eos_token: bool,
     pub chat_template: String,
+    vocab_mapping: Option<HashMap<u32, u32>>, // Maps full vocab IDs to compressed vocab IDs
+    compressed_vocab_size: Option<usize>,
 }
 
 impl Tokenizer {
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
     }
-    pub fn encode(&self, text: &str) -> Vec<u32> {
-        // Quick fix: limit all tokens to be within 2048 range
-        const MAX_VOCAB_SIZE: usize = 2048;
 
-        text.split_whitespace()
-            .map(|word| {
-                self.vocab
-                    .iter()
-                    .position(|v| v == word)
-                    .unwrap_or(3) // Use token 3 as unknown (common choice)
-                    .min(MAX_VOCAB_SIZE - 1) as u32 // Ensure it's within range
+    pub fn compressed_vocab_size(&self) -> usize {
+        self.compressed_vocab_size.unwrap_or(self.vocab.len())
+    }
+
+    // Set the compressed vocabulary size from the embedding tensor
+    pub fn set_compressed_vocab_size(&mut self, size: usize) {
+        self.compressed_vocab_size = Some(size);
+
+        // Create a mapping from the most frequent tokens to the compressed vocabulary
+        // For now, we'll use a simple mapping of the first N tokens
+        // In a real implementation, you'd want to map the most frequent tokens
+        let mut mapping = HashMap::new();
+
+        for i in 0..size.min(self.vocab.len()) {
+            mapping.insert(i as u32, i as u32);
+        }
+
+        // Map any remaining high-frequency tokens to available slots
+        self.vocab_mapping = Some(mapping);
+
+        println!(
+            "🔧 Tokenizer: Set compressed vocab size to {} (from full size {})",
+            size,
+            self.vocab.len()
+        );
+    }
+
+    // Simple SentencePiece-like tokenization (very basic implementation)
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        // This is still a simplified tokenizer
+        // For production, you'd implement proper SentencePiece tokenization
+        let mut tokens = Vec::new();
+
+        // Basic word-level tokenization with subword fallback
+        for word in text.split_whitespace() {
+            let word_tokens = self.encode_word(word);
+            tokens.extend(word_tokens);
+        }
+
+        // Map to compressed vocabulary if available
+        if let Some(compressed_size) = self.compressed_vocab_size {
+            tokens = self.map_to_compressed_vocab(tokens, compressed_size);
+        }
+
+        println!(
+            "🔍 Debug: Encoded '{}' to {} tokens: {:?}",
+            text,
+            tokens.len(),
+            &tokens[..tokens.len().min(10)]
+        );
+
+        tokens
+    }
+
+    fn encode_word(&self, word: &str) -> Vec<u32> {
+        // Try to find exact word match first
+        if let Some(pos) = self.vocab.iter().position(|v| v == word) {
+            return vec![pos as u32];
+        }
+
+        // Try lowercase version
+        let lower_word = word.to_lowercase();
+        if let Some(pos) = self.vocab.iter().position(|v| v == &lower_word) {
+            return vec![pos as u32];
+        }
+
+        // Try to find partial matches (very basic subword tokenization)
+        let mut result = Vec::new();
+        let mut remaining = word;
+
+        while !remaining.is_empty() {
+            let mut found = false;
+
+            // Try progressively shorter prefixes
+            for len in (1..=remaining.len()).rev() {
+                let prefix = &remaining[..len];
+                if let Some(pos) = self.vocab.iter().position(|v| v == prefix) {
+                    result.push(pos as u32);
+                    remaining = &remaining[len..];
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                // Fallback: use unknown token and advance by one character
+                result.push(self.get_safe_unknown_token_id());
+                if remaining.len() > 1 {
+                    remaining = &remaining[1..];
+                } else {
+                    break;
+                }
+            }
+        }
+
+        result
+    }
+
+    fn map_to_compressed_vocab(&self, tokens: Vec<u32>, compressed_size: usize) -> Vec<u32> {
+        tokens
+            .into_iter()
+            .map(|token| {
+                if (token as usize) < compressed_size {
+                    // Token is already in compressed vocabulary
+                    token
+                } else {
+                    // Map out-of-range token to a safe alternative
+                    self.get_safe_unknown_token_id()
+                }
             })
             .collect()
     }
 
+    fn get_safe_unknown_token_id(&self) -> u32 {
+        let compressed_size = self.compressed_vocab_size.unwrap_or(self.vocab.len());
+
+        // Try the configured unknown token first
+        if (self.unknown_token_id as usize) < compressed_size {
+            return self.unknown_token_id;
+        }
+
+        // Try other common token IDs
+        let candidates = [3, 0, 1, 2]; // UNK, PAD, BOS, EOS
+        for &candidate in &candidates {
+            if (candidate as usize) < compressed_size {
+                return candidate;
+            }
+        }
+
+        // Last resort: use the last token in compressed vocabulary
+        (compressed_size.saturating_sub(1)) as u32
+    }
+
     pub fn decode(&self, tokens: &[u32]) -> String {
+        let compressed_size = self.compressed_vocab_size();
+
         tokens
             .iter()
-            .map(|&token_id| {
-                self.vocab
-                    .get(token_id as usize)
-                    .map(|s| s.as_str())
-                    .unwrap_or("<UNK>")
+            .filter_map(|&token_id| {
+                if (token_id as usize) < compressed_size && (token_id as usize) < self.vocab.len() {
+                    self.vocab.get(token_id as usize).map(|s| s.as_str())
+                } else {
+                    Some("<UNK>")
+                }
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    // Method to load vocabulary mapping from GGUF metadata
+    pub fn load_vocab_mapping_from_metadata(&mut self, _metadata: &HashMap<String, String>) {
+        // In a real implementation, you might load a vocabulary mapping
+        // from the GGUF metadata if it's provided
+        // For now, we'll use the simple approach above
     }
 }
 
@@ -306,13 +437,78 @@ impl ModelLoader {
         println!("⏱️  Tensor directory: {:?}", tensor_start.elapsed());
         println!("✅ Total load time: {:?}", load_start.elapsed());
 
-        Ok(ModelLoader {
+        let mut loader = ModelLoader {
             _file: file,
             mmap,
             config,
             tensors,
             tokenizer,
-        })
+        };
+
+        loader.configure_tokenizer_for_gemma3n()?;
+
+        Ok(loader)
+    }
+
+    fn configure_tokenizer_for_gemma3n(&mut self) -> io::Result<()> {
+        // Detect if this is a Gemma 3n model
+        if self.config.architecture.contains("gemma3n") {
+            println!("🔍 Detected Gemma 3n model, configuring vocabulary mapping...");
+
+            // Get the actual embedding vocabulary size
+            let embedding_vocab_size = self.get_embedding_vocab_size()?;
+
+            if embedding_vocab_size < self.tokenizer.vocab_size() {
+                println!(
+                    "📊 Full tokenizer vocab: {} tokens",
+                    self.tokenizer.vocab_size()
+                );
+                println!(
+                    "📊 Compressed embedding vocab: {} tokens",
+                    embedding_vocab_size
+                );
+
+                // Configure tokenizer for compressed vocabulary
+                self.tokenizer
+                    .set_compressed_vocab_size(embedding_vocab_size);
+
+                // Update config to reflect actual vocabulary size used by model
+                self.config.vocab_size = embedding_vocab_size as u32;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_embedding_vocab_size(&self) -> io::Result<usize> {
+        // Try different possible embedding tensor names
+        let embedding_tensors = [
+            "token_embd.weight",
+            "per_layer_token_embd.weight",
+            "token_emb.weight",
+            "embed_tokens.weight",
+        ];
+
+        for tensor_name in &embedding_tensors {
+            if let Some(tensor_desc) = self.tensors.get(*tensor_name) {
+                let vocab_size = tensor_desc.shape[0] as usize;
+                println!(
+                    "🎯 Found embedding tensor '{}' with vocab size: {}",
+                    tensor_name, vocab_size
+                );
+                return Ok(vocab_size);
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No embedding tensor found to determine vocabulary size",
+        ))
+    }
+
+    // Helper method for inference engine
+    pub fn get_effective_vocab_size(&self) -> usize {
+        self.tokenizer.compressed_vocab_size()
     }
 
     pub fn config(&self) -> &ModelConfig {

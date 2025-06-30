@@ -1,5 +1,4 @@
 use crate::loader::{ModelConfig, ModelLoader, QuantType, TensorView, Tokenizer};
-use std::collections::HashMap;
 
 // we could  borrow referencs to the loader but that might make things more complicated
 pub struct InferenceEngine {

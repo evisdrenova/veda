@@ -140,7 +140,7 @@ fn run_generate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let model_path = &args[0];
     let prompt = &args[1];
-    let max_tokens = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
+    let max_tokens = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
 
     println!("🚀 Loading model: {}", model_path);
     let load_start = Instant::now();

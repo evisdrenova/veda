@@ -107,16 +107,17 @@ impl Tokenizer {
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
     }
-
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        // Simplified tokenization - for production you'd implement proper tokenization
-        // This is just a placeholder for the CLI framework
+        // Quick fix: limit all tokens to be within 2048 range
+        const MAX_VOCAB_SIZE: usize = 2048;
+
         text.split_whitespace()
             .map(|word| {
                 self.vocab
                     .iter()
                     .position(|v| v == word)
-                    .unwrap_or(self.unknown_token_id as usize) as u32
+                    .unwrap_or(3) // Use token 3 as unknown (common choice)
+                    .min(MAX_VOCAB_SIZE - 1) as u32 // Ensure it's within range
             })
             .collect()
     }

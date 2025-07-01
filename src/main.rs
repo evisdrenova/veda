@@ -149,7 +149,7 @@ fn run_generate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🧠 Creating inference engine...");
     let engine_start = Instant::now();
-    let engine = InferenceEngine::new(loader);
+    let engine = InferenceEngine::new(loader)?;
     println!("⏱️  Engine ready in: {:?}", engine_start.elapsed());
 
     println!("💭 Generating text...");
@@ -195,7 +195,7 @@ fn run_chat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let loader = ModelLoader::load(model_path)?;
 
     println!("🧠 Creating inference engine...");
-    let engine = InferenceEngine::new(loader);
+    let engine = InferenceEngine::new(loader)?;
 
     println!("💬 Interactive Chat Mode");
     println!("Type 'quit' to exit, 'help' for commands");
